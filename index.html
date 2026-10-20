@@ -5,6 +5,9 @@
 let data=initial, week='2026-10-19',editing=null;const cats=['VAŘENÍ','PŘETAŽENÍ','STÁČENÍ SUDY','HRAZENÍ','ZACHLAZENÍ','LAHVOVÁNÍ','ROZVOZ','OSTATNÍ'];const $=id=>document.getElementById(id);const add=(d,n)=>{let x=new Date(d+'T12:00:00');x.setDate(x.getDate()+n);return x.toISOString().slice(0,10)};const monday=d=>{let x=new Date(d+'T12:00:00');return add(d,-((x.getDay()+6)%7))};const fmt=d=>new Date(d+'T12:00:00').toLocaleDateString('cs-CZ',{day:'numeric',month:'numeric'});const names=['Pondělí','Úterý','Středa','Čtvrtek','Pátek','Sobota','Neděle'];const key=()=> 'lp_tasks_'+week;const load=()=>JSON.parse(localStorage.getItem(key())||'[]');const save=t=>localStorage.setItem(key(),JSON.stringify(t));const suppressed=()=>JSON.parse(localStorage.getItem(key()+'_hidden')||'[]');const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));function make(id,date,cat,desc,worker='',auto=true){return{id,date,cat,desc,worker,auto}};
 const tankNames=['CKT1','CKT2','CKT3','CKT4','CKT7','CKT8','LT1','LT2','LT3','LT4','MCKT5','MCKT6','MLT5','MLT6'];
 let columnMap={brew:1,delivery:16,brewer:17,bottle:18,keg:19};
+let redTanks={};
+function isRedFill(c){if(!c)return false;const r=c.red??0,g=c.green??0,b=c.blue??0;return r>.78&&g<.43&&b<.43;}
+function beerForTank(v,i){const m=String(v).match(/(?:K|L)\s*(\d+(?:_\d+)?)/i);if(!m)return tankNames[i];const batch=m[1];const brew=data.find(r=>{const b=String(r[columnMap.brew]||'');return new RegExp('^\\s*'+batch.replace(/_/g,'[_ ]')+'(?!\\d)').test(b);});if(brew){let t=String(brew[columnMap.brew]||'').replace(/^\s*\d+(?:_\d+)?\s*(?:1\/2|2\/2|1\/1)?\s*/i,'').trim();if(t&&!/^\d/.test(t))return t;}return tankNames[i]+' ('+batch+')';}
 function proposals(){
  const start=week,end=add(week,6),out=[];
  for(const r of data.filter(r=>r[0]>=start&&r[0]<=end)){
@@ -21,12 +24,17 @@ function proposals(){
    if(Number(m[2])===5)out.push(make('h_'+d+'_'+i,d,'HRAZENÍ',m[1]+' · '+tankNames[i]));
    if(Number(m[2])===12)out.push(make('transfer_'+d+'_'+i,d,'PŘETAŽENÍ',m[1]+' · '+tankNames[i]+' (návrh, ověřit termín)'));
   }
+  const red=redTanks[d]||[];
+  for(const i of red){
+   const v=tanks[i];if(!v)continue;
+   out.push(make('red_keg_'+d+'_'+i,d,'STÁČENÍ SUDY',beerForTank(v,i),String(r[columnMap.keg]||'').trim()));
+  }
   for(const [col,cat,desc,prefix] of [
    [columnMap.delivery,'ROZVOZ','Rozvoz','delivery'],
    [columnMap.bottle,'LAHVOVÁNÍ','Lahvování','bottle'],
    [columnMap.keg,'STÁČENÍ SUDY','Stáčení sudů','keg']]){
     const val=String(r[col]||'').trim();
-    if(val)out.push(make(prefix+'_'+d,d,cat,desc,val));
+    if(val && (prefix!=='keg'||!red.length))out.push(make(prefix+'_'+d,d,cat,desc,val));
   }
  }
  return out;
@@ -67,9 +75,32 @@ $('sync').onclick=async()=>{
  if(columnMap.brewer<0)columnMap.brewer=17;
  const rows=raw.map(r=>[dateISO(r[0]),...Array.from({length:Math.max(19,headers.length-1)},(_,i)=>String(r[i+1]??''))]).filter(r=>/^\d{4}-\d\d-\d\d$/.test(r[0]));
  if(!rows.length)throw Error('V listu '+tab+' jsem nenašel datumy ve sloupci A.');
- data=rows;localStorage.setItem('lp_sheetid',id);generate();
+ data=rows;
+ // Červené podbarvení tanku je informace o stáčení; běžné values API barvy nevrací.
+ redTanks={};
+ const weekIndexes=raw.map((r,i)=>({d:dateISO(r[0]),i})).filter(x=>x.d>=week&&x.d<=add(week,6));
+ if(weekIndexes.length){
+  const from=Math.min(...weekIndexes.map(x=>x.i)),to=Math.max(...weekIndexes.map(x=>x.i))+1;
+  const gridRange=`'${tab}'!C${from+1}:P${to}`;
+  const fmtUrl=`https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(id)}?ranges=${encodeURIComponent(gridRange)}&includeGridData=true&fields=${encodeURIComponent('sheets(data(startRow,startColumn,rowData(values(effectiveFormat(backgroundColor)))))')}`;
+  const fr=await fetch(fmtUrl,{headers:{Authorization:'Bearer '+accessToken}});
+  const fj=await fr.json();if(!fr.ok)throw Error('Barvy tanků: '+(fj.error?.message||fr.status));
+  for(const grid of fj.sheets?.[0]?.data||[]){
+   for(let k=0;k<(grid.rowData||[]).length;k++){
+    const sourceRow=(grid.startRow||0)+k;const d=dateISO(raw[sourceRow]?.[0]);if(!d)continue;
+    const cells=grid.rowData[k].values||[];
+    for(let j=0;j<cells.length;j++){
+     const col=(grid.startColumn||0)+j;if(col<2||col>15)continue;
+     if(isRedFill(cells[j]?.effectiveFormat?.backgroundColor)&&(raw[sourceRow]?.[col]??'')!==''){
+      (redTanks[d]??=[]).push(col-2);
+     }
+    }
+   }
+  }
+ }
+ localStorage.setItem('lp_sheetid',id);generate();
  const count=proposals().length;const weekRows=rows.filter(r=>r[0]>=week&&r[0]<=add(week,6));const sample=weekRows.find(r=>r.slice(1,16).some(v=>String(v||'').trim()));
- status('Načten list „'+tab+'“ ('+rows.length+' dní). Týden: '+weekRows.length+' řádků, '+count+' rozpoznaných návrhů.'+(count?' Rozpis vytvořen.':' POZOR: žádné návrhy. '+(sample?'Ukázka výrobního řádku: '+JSON.stringify(sample.slice(0,7)).slice(0,230):'V týdnu nejsou vyplněné výrobní buňky.')));
+ status('Načten list „'+tab+'“ ('+rows.length+' dní). Týden: '+weekRows.length+' řádků, '+count+' rozpoznaných návrhů (červené tanky: '+Object.values(redTanks).reduce((n,a)=>n+a.length,0)+').'+(count?' Rozpis vytvořen.':' POZOR: žádné návrhy. '+(sample?'Ukázka výrobního řádku: '+JSON.stringify(sample.slice(0,7)).slice(0,230):'V týdnu nejsou vyplněné výrobní buňky.')));
  }catch(e){status('Nepodařilo se načíst tabulku: '+e.message+' — ověř účet, oprávnění, ID tabulky a název listu.');}
 };
 render();
