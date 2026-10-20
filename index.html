@@ -62,7 +62,21 @@ function proposals(){
    const val=String(r[col]||'').trim();if(val&&d>=start)emit(make(prefix+'_'+d,d,cat,desc,val));
   }
   const keg=String(r[columnMap.keg]||'').trim();
-  if(keg&&d>=start&&!out.some(t=>t.date===d&&t.cat==='STÁČENÍ SUDY'))emit(make('keg_'+d,d,'STÁČENÍ SUDY','Stáčení sudů (tank neurčen)',keg));
+  if(keg&&d>=start&&!out.some(t=>t.date===d&&t.cat==='STÁČENÍ SUDY')){
+   // Záložní rozpoznání: v den stáčení končí záznam várky v tanku.
+   // Funguje i při nedostupných informacích o barvě z Google Sheets API.
+   const ending=tanks.map((v,i)=>({v,i,batch:batchOf(v)}))
+     .filter(x=>x.batch&&!sameBatch(x.batch,batchOf(next[x.i])));
+   if(ending.length===1){
+    const x=ending[0];
+    emit(make('keg_'+d,d,'STÁČENÍ SUDY',beerForTank(x.v,x.i)+' · '+tankNames[x.i],keg));
+   }else if(ending.length>1){
+    // Upřednostnit skutečně červeně označený tank; jinak nehádat.
+    const redEnding=ending.filter(x=>(redTanks[d]||[]).includes(x.i));
+    if(redEnding.length===1){const x=redEnding[0];emit(make('keg_'+d,d,'STÁČENÍ SUDY',beerForTank(x.v,x.i)+' · '+tankNames[x.i],keg));}
+    else emit(make('keg_'+d,d,'STÁČENÍ SUDY','Stáčení sudů (tank k ověření)',keg));
+   }else emit(make('keg_'+d,d,'STÁČENÍ SUDY','Stáčení sudů (tank neurčen)',keg));
+  }
  }
  return out;
 }
